@@ -4,14 +4,14 @@ const { useState, useEffect, useRef } = React;
 // CONSTANTS
 // ========================================
 const EARTH_RADIUS_KM = 6371;
-const MAX_GPS_ACCURACY_METERS = 20; // Ignore GPS readings with accuracy worse than 20m
-const MIN_DISTANCE_THRESHOLD_METERS = 5; // Only count movements > 5m
+const MAX_GPS_ACCURACY_METERS = 30; // Increased to accept more GPS readings
+const MIN_DISTANCE_THRESHOLD_METERS = 3; // Reduced back to 3m for better tracking
 const PACE_SMOOTHING_WINDOW = 5; // Number of samples for 10-second rolling average
 const VOICE_ANNOUNCEMENT_INTERVAL_METERS = 500; // Announce pace every 500m
 const GPS_OPTIONS = {
     enableHighAccuracy: true,
-    maximumAge: 5000,
-    timeout: 10000
+    maximumAge: 1000, // Reduced for more frequent updates
+    timeout: 5000
 };
 const STORAGE_KEY = 'running_tracker_history'; // LocalStorage key for run history
 
@@ -436,15 +436,17 @@ function SummaryView({ totalTime, totalDistance, onNewRun, onSaveRun }) {
             </div>
 
             <div className="space-y-3">
-                {!saved ? (
+                {!saved && (
                     <button
                         onClick={handleSave}
                         className="w-full px-8 py-4 text-xl font-bold bg-blue-500 hover:bg-blue-600 rounded-lg shadow-lg active:scale-95 transition-transform"
                     >
                         Save Run
                     </button>
-                ) : (
-                    <div className="w-full px-8 py-4 text-center text-green-400 font-semibold bg-green-900 bg-opacity-30 rounded-lg">
+                )}
+                
+                {saved && (
+                    <div className="w-full px-8 py-4 text-center text-green-400 font-semibold bg-green-900 bg-opacity-30 rounded-lg mb-3">
                         ✓ Run Saved
                     </div>
                 )}
@@ -453,7 +455,7 @@ function SummaryView({ totalTime, totalDistance, onNewRun, onSaveRun }) {
                     onClick={onNewRun}
                     className="w-full px-8 py-4 text-xl font-bold bg-green-500 hover:bg-green-600 rounded-lg shadow-lg active:scale-95 transition-transform"
                 >
-                    Start New Run
+                    {saved ? 'Back to Home' : 'Skip & Go Home'}
                 </button>
             </div>
         </div>
@@ -637,9 +639,9 @@ function App() {
 
         watchIdRef.current = navigator.geolocation.watchPosition(
             (position) => {
-                setGpsStatus('Tracking');
+                setGpsStatus(`Tracking (${position.coords.accuracy.toFixed(0)}m accuracy)`);
                 
-                // Filter 1: Check GPS accuracy - ignore if worse than 20m
+                // Filter 1: Check GPS accuracy - ignore if worse than 30m
                 if (position.coords.accuracy > MAX_GPS_ACCURACY_METERS) {
                     console.log(`GPS accuracy too low: ${position.coords.accuracy}m, ignoring`);
                     return;
@@ -665,10 +667,13 @@ function App() {
                             newPoint.lon
                         );
 
-                        // Filter 2: Movement threshold - only add distance if moved > 5m
+                        console.log(`Distance since last point: ${distanceIncrement.toFixed(2)}m`);
+
+                        // Filter 2: Movement threshold - only add distance if moved > 3m
                         if (distanceIncrement >= MIN_DISTANCE_THRESHOLD_METERS) {
                             setTotalDistance((prev) => {
                                 const newDistance = prev + distanceIncrement;
+                                console.log(`Total distance: ${(newDistance / 1000).toFixed(3)}km`);
                                 
                                 // Check for voice announcements every 500m
                                 const kmTraveled = newDistance / 1000;
@@ -682,6 +687,8 @@ function App() {
                                 
                                 return newDistance;
                             });
+                        } else {
+                            console.log(`Movement too small (${distanceIncrement.toFixed(2)}m), ignoring`);
                         }
                     }
                     
