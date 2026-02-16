@@ -3,10 +3,11 @@ const { useState, useEffect, useRef } = React;
 // ========================================
 // CONSTANTS
 // ========================================
-const GOAL_PACE_SECONDS_PER_KM = 5 * 60; // 5:00 per kilometre
 const EARTH_RADIUS_KM = 6371;
-const MIN_DISTANCE_THRESHOLD_METERS = 3; // Filter out GPS updates < 3m
-const PACE_SMOOTHING_WINDOW = 5; // Number of samples for pace smoothing
+const MAX_GPS_ACCURACY_METERS = 20; // Ignore GPS readings with accuracy worse than 20m
+const MIN_DISTANCE_THRESHOLD_METERS = 5; // Only count movements > 5m
+const PACE_SMOOTHING_WINDOW = 5; // Number of samples for 10-second rolling average
+const VOICE_ANNOUNCEMENT_INTERVAL_METERS = 500; // Announce pace every 500m
 const GPS_OPTIONS = {
     enableHighAccuracy: true,
     maximumAge: 5000,
@@ -135,6 +136,23 @@ function formatDate(dateString) {
     return date.toLocaleDateString('en-US', options);
 }
 
+/**
+ * Speak text using Web Speech API
+ * @param {string} text - Text to speak
+ */
+function speak(text) {
+    if ('speechSynthesis' in window) {
+        // Cancel any ongoing speech
+        window.speechSynthesis.cancel();
+        
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+        window.speechSynthesis.speak(utterance);
+    }
+}
+
 // ========================================
 // COMPONENTS
 // ========================================
@@ -146,6 +164,7 @@ function formatDate(dateString) {
 function StatusBar({ runState, gpsStatus, keepAwake, setKeepAwake, wakeLockSupported }) {
     const stateLabels = {
         idle: 'Ready',
+        setup: 'Setup',
         running: 'Running',
         paused: 'Paused',
         finished: 'Finished'
@@ -176,37 +195,138 @@ function StatusBar({ runState, gpsStatus, keepAwake, setKeepAwake, wakeLockSuppo
 }
 
 /**
- * Metric Display Component
- * Shows current pace, distance, and time during run
+ * Run Setup Component
+ * Set goal pace and target distance before starting run
  */
-function MetricDisplay({ currentPace, distance, time, runState }) {
+function RunSetup({ onStart, onCancel }) {
+    const [goalMinutes, setGoalMinutes] = useState(5);
+    const [goalSeconds, setGoalSeconds] = useState(0);
+    const [targetDistance, setTargetDistance] = useState(5.0);
+
+    const handleStart = () => {
+        const goalPaceSeconds = goalMinutes * 60 + goalSeconds;
+        onStart(goalPaceSeconds, targetDistance);
+    };
+
     return (
-        <div className="text-center space-y-8 mb-12">
+        <div className="bg-gray-800 rounded-2xl p-8 max-w-md w-full shadow-2xl">
+            <h2 className="text-3xl font-bold text-center mb-8">Run Setup</h2>
+            
+            <div className="space-y-6">
+                {/* Goal Pace */}
+                <div>
+                    <label className="block text-sm opacity-75 mb-3">Goal Pace (per km)</label>
+                    <div className="flex items-center justify-center gap-4">
+                        <div className="flex flex-col items-center">
+                            <input
+                                type="number"
+                                value={goalMinutes}
+                                onChange={(e) => setGoalMinutes(Math.max(0, parseInt(e.target.value) || 0))}
+                                className="w-20 h-20 text-4xl font-bold text-center bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                                min="0"
+                                max="59"
+                            />
+                            <span className="text-xs mt-2 opacity-75">min</span>
+                        </div>
+                        <span className="text-4xl font-bold">:</span>
+                        <div className="flex flex-col items-center">
+                            <input
+                                type="number"
+                                value={goalSeconds}
+                                onChange={(e) => setGoalSeconds(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
+                                className="w-20 h-20 text-4xl font-bold text-center bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                                min="0"
+                                max="59"
+                            />
+                            <span className="text-xs mt-2 opacity-75">sec</span>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Target Distance */}
+                <div>
+                    <label className="block text-sm opacity-75 mb-3">Target Distance (km)</label>
+                    <input
+                        type="number"
+                        value={targetDistance}
+                        onChange={(e) => setTargetDistance(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                        step="0.1"
+                        className="w-full h-16 text-3xl font-bold text-center bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                        min="0.1"
+                    />
+                </div>
+            </div>
+
+            <div className="mt-8 space-y-3">
+                <button
+                    onClick={handleStart}
+                    className="w-full px-8 py-4 text-xl font-bold bg-green-500 hover:bg-green-600 rounded-lg shadow-lg active:scale-95 transition-transform"
+                >
+                    Start Run
+                </button>
+                <button
+                    onClick={onCancel}
+                    className="w-full px-6 py-3 text-lg bg-gray-600 hover:bg-gray-500 rounded-lg active:scale-95 transition-transform"
+                >
+                    Cancel
+                </button>
+            </div>
+        </div>
+    );
+}
+
+/**
+ * Metric Display Component
+ * Shows current pace, distance, time, and progress during run
+ */
+function MetricDisplay({ currentPace, distance, time, runState, targetDistance, goalPace }) {
+    const distanceNum = parseFloat(distance);
+    const progress = targetDistance > 0 ? Math.min((distanceNum / targetDistance) * 100, 100) : 0;
+    
+    return (
+        <div className="text-center space-y-6 mb-8 w-full max-w-md px-4">
+            {/* Progress Bar */}
+            {targetDistance > 0 && (
+                <div className="w-full">
+                    <div className="flex justify-between text-xs mb-2 opacity-75">
+                        <span>{distance} km</span>
+                        <span>{targetDistance.toFixed(1)} km</span>
+                    </div>
+                    <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden">
+                        <div 
+                            className="bg-green-500 h-full transition-all duration-500 rounded-full"
+                            style={{ width: `${progress}%` }}
+                        />
+                    </div>
+                    <div className="text-sm mt-1 opacity-75">{progress.toFixed(0)}% Complete</div>
+                </div>
+            )}
+
             {/* Current Pace - Largest */}
             <div>
-                <div className="text-sm uppercase tracking-wider opacity-75 mb-2">Current Pace</div>
-                <div className="text-8xl font-bold tabular-nums metric-text">
+                <div className="text-xs uppercase tracking-wider opacity-75 mb-1">10s Avg Pace</div>
+                <div className="text-6xl sm:text-7xl font-bold tabular-nums metric-text">
                     {currentPace !== null ? formatPace(currentPace) : '–:–'}
                 </div>
-                <div className="text-2xl opacity-75 mt-1">/km</div>
+                <div className="text-xl opacity-75 mt-1">/km</div>
             </div>
 
             {/* Distance and Time */}
-            <div className="grid grid-cols-2 gap-8">
+            <div className="grid grid-cols-2 gap-6">
                 <div>
                     <div className="text-xs uppercase tracking-wider opacity-75 mb-1">Distance</div>
-                    <div className="text-5xl font-bold tabular-nums metric-text">{distance}</div>
-                    <div className="text-lg opacity-75">km</div>
+                    <div className="text-4xl font-bold tabular-nums metric-text">{distance}</div>
+                    <div className="text-sm opacity-75">km</div>
                 </div>
                 <div>
                     <div className="text-xs uppercase tracking-wider opacity-75 mb-1">Time</div>
-                    <div className="text-5xl font-bold tabular-nums metric-text">{formatTime(time)}</div>
+                    <div className="text-4xl font-bold tabular-nums metric-text">{formatTime(time)}</div>
                 </div>
             </div>
 
             {/* Goal indicator */}
             <div className="text-sm opacity-75">
-                Goal: {formatPace(GOAL_PACE_SECONDS_PER_KM)}/km
+                Goal: {formatPace(goalPace)}/km
             </div>
         </div>
     );
@@ -434,11 +554,15 @@ function RunHistory({ onClose, onDeleteRun }) {
 // ========================================
 
 function App() {
-    // Run state machine: idle, running, paused, finished
+    // Run state machine: idle, setup, running, paused, finished
     const [runState, setRunState] = useState('idle');
     
     // View state: 'tracker' or 'history'
     const [view, setView] = useState('tracker');
+    
+    // Run configuration
+    const [goalPaceSeconds, setGoalPaceSeconds] = useState(5 * 60);
+    const [targetDistance, setTargetDistance] = useState(5.0);
     
     // GPS tracking
     const [gpsPoints, setGpsPoints] = useState([]);
@@ -452,8 +576,11 @@ function App() {
     const startTimeRef = useRef(null);
     const pausedTimeRef = useRef(0);
     
-    // Pace smoothing
+    // Pace smoothing - store last 5 pace readings for 10-second rolling average
     const paceWindowRef = useRef([]);
+    
+    // Voice announcements
+    const lastAnnouncementDistanceRef = useRef(0);
     
     // Wake lock
     const [keepAwake, setKeepAwake] = useState(false);
@@ -512,6 +639,12 @@ function App() {
             (position) => {
                 setGpsStatus('Tracking');
                 
+                // Filter 1: Check GPS accuracy - ignore if worse than 20m
+                if (position.coords.accuracy > MAX_GPS_ACCURACY_METERS) {
+                    console.log(`GPS accuracy too low: ${position.coords.accuracy}m, ignoring`);
+                    return;
+                }
+                
                 const newPoint = {
                     lat: position.coords.latitude,
                     lon: position.coords.longitude,
@@ -532,9 +665,23 @@ function App() {
                             newPoint.lon
                         );
 
-                        // GPS jitter filter: only add distance if > threshold
+                        // Filter 2: Movement threshold - only add distance if moved > 5m
                         if (distanceIncrement >= MIN_DISTANCE_THRESHOLD_METERS) {
-                            setTotalDistance((prev) => prev + distanceIncrement);
+                            setTotalDistance((prev) => {
+                                const newDistance = prev + distanceIncrement;
+                                
+                                // Check for voice announcements every 500m
+                                const kmTraveled = newDistance / 1000;
+                                const lastAnnouncementKm = lastAnnouncementDistanceRef.current / 1000;
+                                
+                                if (Math.floor(kmTraveled / 0.5) > Math.floor(lastAnnouncementKm / 0.5)) {
+                                    // Time for an announcement
+                                    makeVoiceAnnouncement(newDistance);
+                                    lastAnnouncementDistanceRef.current = newDistance;
+                                }
+                                
+                                return newDistance;
+                            });
                         }
                     }
                     
@@ -605,10 +752,21 @@ function App() {
     // RUN CONTROL HANDLERS
     // ========================================
 
-    function handleStart() {
+    function handleSetupRun() {
+        setRunState('setup');
+    }
+
+    function handleCancelSetup() {
+        setRunState('idle');
+    }
+
+    function handleStartFromSetup(goalPace, distance) {
+        setGoalPaceSeconds(goalPace);
+        setTargetDistance(distance);
         setRunState('running');
         startGPSTracking();
         startTimer();
+        lastAnnouncementDistanceRef.current = 0;
     }
 
     function handlePause() {
@@ -636,7 +794,9 @@ function App() {
             time: elapsedTime,
             distance: distanceKm,
             avgPace: avgPace,
-            date: new Date().toISOString()
+            date: new Date().toISOString(),
+            goalPace: goalPaceSeconds,
+            targetDistance: targetDistance
         });
     }
 
@@ -648,6 +808,37 @@ function App() {
         resetTimer();
         paceWindowRef.current = [];
         setCurrentRunData(null);
+        lastAnnouncementDistanceRef.current = 0;
+    }
+
+    /**
+     * Make voice announcement about pace
+     */
+    function makeVoiceAnnouncement(distanceMeters) {
+        const distanceKm = distanceMeters / 1000;
+        const currentPace = getCurrentPace();
+        
+        if (currentPace === null) return;
+        
+        const paceText = formatPace(currentPace);
+        const goalPaceText = formatPace(goalPaceSeconds);
+        
+        let message = `${distanceKm.toFixed(1)} kilometers. Current pace: ${paceText} per kilometer. `;
+        
+        // Add motivational message based on performance
+        const paceDiff = currentPace - goalPaceSeconds;
+        
+        if (paceDiff < -10) {
+            message += "Excellent work! You're well ahead of pace!";
+        } else if (paceDiff < 0) {
+            message += "Great job! You're right on pace!";
+        } else if (paceDiff < 10) {
+            message += "You're slightly behind pace. Keep pushing!";
+        } else {
+            message += "Pick up the pace! You can do it!";
+        }
+        
+        speak(message);
     }
 
     /**
@@ -710,7 +901,7 @@ function App() {
      * @returns {string} Tailwind CSS class for background color
      */
     function getBackgroundColor() {
-        if (runState === 'idle' || runState === 'finished') {
+        if (runState === 'idle' || runState === 'setup' || runState === 'finished') {
             return 'bg-gray-900';
         }
         
@@ -718,7 +909,7 @@ function App() {
             return 'bg-gray-900'; // Neutral when no pace data
         }
         
-        if (currentPace < GOAL_PACE_SECONDS_PER_KM) {
+        if (currentPace < goalPaceSeconds) {
             return 'bg-green-600'; // Faster than goal
         } else {
             return 'bg-red-600'; // Slower than goal
@@ -743,7 +934,7 @@ function App() {
                 />
             )}
             
-            <div className={`min-h-screen ${getBackgroundColor()} transition-colors duration-500 text-white flex flex-col`}>
+            <div className={`min-h-screen ${getBackgroundColor()} transition-colors duration-500 text-white flex flex-col overflow-hidden`}>
                 {/* Status Bar */}
                 <StatusBar 
                     runState={runState}
@@ -753,15 +944,35 @@ function App() {
                     wakeLockSupported={wakeLockSupported}
                 />
 
-                {/* Main Content */}
-                <div className="flex-1 flex flex-col justify-center items-center px-4">
-                    {runState === 'finished' ? (
+                {/* Main Content - Scrollable */}
+                <div className="flex-1 flex flex-col justify-center items-center px-4 py-4 overflow-y-auto">
+                    {runState === 'setup' ? (
+                        <RunSetup
+                            onStart={handleStartFromSetup}
+                            onCancel={handleCancelSetup}
+                        />
+                    ) : runState === 'finished' ? (
                         <SummaryView
                             totalTime={elapsedTime}
                             totalDistance={distanceKm}
                             onNewRun={handleNewRun}
                             onSaveRun={handleSaveRun}
                         />
+                    ) : runState === 'idle' ? (
+                        <div className="text-center space-y-6">
+                            <button
+                                onClick={handleSetupRun}
+                                className="px-12 py-6 text-2xl font-bold bg-green-500 hover:bg-green-600 text-white rounded-lg shadow-lg active:scale-95 transition-transform"
+                            >
+                                Start New Run
+                            </button>
+                            <button
+                                onClick={handleViewHistory}
+                                className="px-8 py-3 text-lg bg-gray-700 hover:bg-gray-600 rounded-lg shadow-lg active:scale-95 transition-transform"
+                            >
+                                📊 View Run History
+                            </button>
+                        </div>
                     ) : (
                         <>
                             <MetricDisplay
@@ -769,25 +980,17 @@ function App() {
                                 distance={distanceKm}
                                 time={elapsedTime}
                                 runState={runState}
+                                targetDistance={targetDistance}
+                                goalPace={goalPaceSeconds}
                             />
                             
                             <Controls
                                 runState={runState}
-                                onStart={handleStart}
+                                onStart={handleSetupRun}
                                 onPause={handlePause}
                                 onResume={handleResume}
                                 onFinish={handleFinish}
                             />
-
-                            {/* History Button - Only show when idle */}
-                            {runState === 'idle' && (
-                                <button
-                                    onClick={handleViewHistory}
-                                    className="mt-6 px-8 py-3 text-lg bg-gray-700 hover:bg-gray-600 rounded-lg shadow-lg active:scale-95 transition-transform"
-                                >
-                                    📊 View Run History
-                                </button>
-                            )}
                         </>
                     )}
                 </div>
@@ -801,4 +1004,3 @@ function App() {
 // ========================================
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
-
